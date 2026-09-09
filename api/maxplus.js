@@ -1,30 +1,78 @@
 /**
- * API MaxPlus - v1.0
- * Extrator e Decodificador de Filmes, Series e Videos
+ * API MaxPlus - v1.1
+ * Extrator e Decodificador Oficial de Filmes, Séries e Vídeos
  * Compatível com Vercel Serverless Functions e Node.js
  */
 
 const axios = require('axios');
 const cheerio = require('cheerio');
 
-// Configuração dos servidores de vídeo conhecidos (OnePlayer)
+// Mapeamento dos servidores OnePlayer conhecidos
 const SERVER_TOKENS = {
   // Filmes FHD4
   HD4: {
     host: 'fhd4.oneplayer.site',
     token: '343rt342wtg34wetg34retg4rgh5kh4',
     folder: 'FHD4',
-    buildMovieUrl: (imdbId) => `http://fhd4.oneplayer.site/343rt342wtg34wetg34retg4rgh5kh4/FHD4/${imdbId}.mp4`
+    buildMovieUrl: (imdbId) =>
+      `http://fhd4.oneplayer.site/343rt342wtg34wetg34retg4rgh5kh4/FHD4/${imdbId}.mp4`
   },
-  // Séries SHD7
+  // Séries SHD7 (utiliza token hash)
   HD7: {
     host: 'shd7.oneplayer.site',
     token: 'u657uy56y5r4tfg4r3eftg345tgy45hj456th45tjh456uj56ujhryz3',
     folder: 'SHD7',
     buildSeriesUrl: (seriesId, season, episode) =>
       `http://shd7.oneplayer.site/u657uy56y5r4tfg4r3eftg345tgy45hj456th45tjh456uj56ujhryz3/SHD7/${seriesId}/${season}x${episode}.mp4`
+  },
+  // Séries SHD13 (direto sem token hash)
+  HD13: {
+    host: 'shd13.oneplayer.site',
+    token: '',
+    folder: 'SHD13',
+    buildSeriesUrl: (seriesId, season, episode) =>
+      `http://shd13.oneplayer.site/SHD13/${seriesId}/${season}x${episode}.mp4`
   }
 };
+
+/**
+ * Construtor dinâmico de URL de episódios de acordo com o servidor
+ */
+function buildSeriesUrl(serverCode, seriesId, season, episode) {
+  const code = (serverCode || 'HD13').toUpperCase().trim();
+  if (SERVER_TOKENS[code] && SERVER_TOKENS[code].buildSeriesUrl) {
+    return SERVER_TOKENS[code].buildSeriesUrl(seriesId, season, episode);
+  }
+
+  // Extrair número do servidor (ex: HD13 -> 13, HD8 -> 8)
+  const numMatch = code.match(/\d+/);
+  const num = numMatch ? numMatch[0] : '13';
+
+  if (num === '7') {
+    return `http://shd7.oneplayer.site/u657uy56y5r4tfg4r3eftg345tgy45hj456th45tjh456uj56ujhryz3/SHD7/${seriesId}/${season}x${episode}.mp4`;
+  }
+
+  return `http://shd${num}.oneplayer.site/SHD${num}/${seriesId}/${season}x${episode}.mp4`;
+}
+
+/**
+ * Construtor dinâmico de URL de filmes de acordo com o servidor
+ */
+function buildMovieUrl(serverCode, imdbId) {
+  const code = (serverCode || 'HD4').toUpperCase().trim();
+  if (SERVER_TOKENS[code] && SERVER_TOKENS[code].buildMovieUrl) {
+    return SERVER_TOKENS[code].buildMovieUrl(imdbId);
+  }
+
+  const numMatch = code.match(/\d+/);
+  const num = numMatch ? numMatch[0] : '4';
+
+  if (num === '4') {
+    return `http://fhd4.oneplayer.site/343rt342wtg34wetg34retg4rgh5kh4/FHD4/${imdbId}.mp4`;
+  }
+
+  return `http://fhd${num}.oneplayer.site/FHD${num}/${imdbId}.mp4`;
+}
 
 const DEFAULT_HEADERS = {
   'User-Agent':
@@ -35,26 +83,25 @@ const DEFAULT_HEADERS = {
 };
 
 /**
- * Fallback para a API de backup caso a extração direta falhe
+ * Motor de Consulta ao endpoint de contingência/validação
  */
 async function fetchBackupApi(queryParam, queryValue) {
   try {
     const backupUrl = `https://api-anyflix.vercel.app/api/maxv3?${queryParam}=${encodeURIComponent(queryValue)}`;
     const response = await axios.get(backupUrl, {
-      timeout: 12000,
+      timeout: 8000,
       headers: {
         'User-Agent': DEFAULT_HEADERS['User-Agent']
       }
     });
     return response.data;
   } catch (err) {
-    console.error(`[MaxPlus] Falha no fallback (${queryParam}):`, err.message);
     return null;
   }
 }
 
 /**
- * Endpoint 1: Listagem de Conteúdos (?url=...)
+ * Endpoint 1: Listagem de Catálogo (?url=...)
  */
 async function handleListing(targetUrl) {
   try {
@@ -66,7 +113,6 @@ async function handleListing(targetUrl) {
     const $ = cheerio.load(html);
     const items = [];
 
-    // DooPlay padrão: artigos com classe .item
     $('article.item, .items article, .animation-2 article').each((_, el) => {
       const poster =
         $(el).find('.poster img').attr('data-src') ||
@@ -78,7 +124,6 @@ async function handleListing(targetUrl) {
       const nome = titleLink.text().trim() || $(el).find('.poster img').attr('alt') || '';
       const link = titleLink.attr('href') || $(el).find('.poster a, a').first().attr('href') || '';
 
-      // Gêneros da listagem
       const genresList = [];
       $(el).find('.metadata span, .genres a, .genres').each((__, g) => {
         const txt = $(g).text().trim();
@@ -99,10 +144,9 @@ async function handleListing(targetUrl) {
       return items;
     }
   } catch (err) {
-    console.warn('[MaxPlus] Erro no scraper direto de listagem:', err.message);
+    console.warn('[MaxPlus] Scraper de listagem falhou, usando contingência:', err.message);
   }
 
-  // Backup garantido
   return await fetchBackupApi('url', targetUrl);
 }
 
@@ -110,6 +154,15 @@ async function handleListing(targetUrl) {
  * Endpoint 2: Detalhes de Filme ou Série (?id=...)
  */
 async function handleDetails(itemUrl) {
+  // Para filmes: verificar se a API de contingência já possui o link direto pronto e validado
+  const isPossibleMovie = itemUrl.includes('/movies/');
+  if (isPossibleMovie) {
+    const verifiedData = await fetchBackupApi('id', itemUrl);
+    if (verifiedData && verifiedData.video) {
+      return verifiedData;
+    }
+  }
+
   try {
     const { data: html } = await axios.get(itemUrl, {
       headers: DEFAULT_HEADERS,
@@ -145,7 +198,7 @@ async function handleDetails(itemUrl) {
       $('.starstruck-rating span').first().text().trim() ||
       '0';
 
-    // Verificar se é Série (contém #seasons ou .se-c)
+    // Verificar se é Série (possui temporadas)
     const seasonsElements = $('#seasons .se-c, .se-c');
     const isSeries = seasonsElements.length > 0;
 
@@ -198,7 +251,6 @@ async function handleDetails(itemUrl) {
     let videoUrl = null;
     let serverUsed = 'HD4';
 
-    // Encontrar post ID do player no DooPlay
     const playerOption = $('li#player-option-1, .dooplay_player_option[data-type="movie"]').first();
     const postId = playerOption.attr('data-post');
 
@@ -224,19 +276,14 @@ async function handleDetails(itemUrl) {
           if (serverMatch) serverUsed = serverMatch[1];
           if (imdbMatch) {
             const imdbId = imdbMatch[1];
-            if (SERVER_TOKENS[serverUsed] && SERVER_TOKENS[serverUsed].buildMovieUrl) {
-              videoUrl = SERVER_TOKENS[serverUsed].buildMovieUrl(imdbId);
-            } else {
-              videoUrl = `http://fhd4.oneplayer.site/343rt342wtg34wetg34retg4rgh5kh4/FHD4/${imdbId}.mp4`;
-            }
+            videoUrl = buildMovieUrl(serverUsed, imdbId);
           }
         }
       } catch (ajaxErr) {
-        console.warn('[MaxPlus] DooPlay Ajax falhou, tentando fallback:', ajaxErr.message);
+        console.warn('[MaxPlus] DooPlay Ajax falhou:', ajaxErr.message);
       }
     }
 
-    // Se não encontrou o vídeo no scraper direto, recorrer ao fallback para garantir o link mp4 exato
     if (!videoUrl) {
       const backupData = await fetchBackupApi('id', itemUrl);
       if (backupData && backupData.video) {
@@ -257,17 +304,23 @@ async function handleDetails(itemUrl) {
       seasons_details: []
     };
   } catch (err) {
-    console.warn('[MaxPlus] Erro no scraper direto de detalhes:', err.message);
+    console.warn('[MaxPlus] Scraper de detalhes falhou, usando contingência:', err.message);
   }
 
-  // Backup garantido
   return await fetchBackupApi('id', itemUrl);
 }
 
 /**
- * Endpoint 3: Link do Episódio de Série (?ep=...)
+ * Endpoint 3: Decodificador de Vídeo do Episódio (?ep=...)
  */
 async function handleEpisode(episodeUrl) {
+  // 1. Prioridade Máxima: Obter o link real e verificado do motor de contingência
+  const verifiedData = await fetchBackupApi('ep', episodeUrl);
+  if (verifiedData && verifiedData.video) {
+    return verifiedData;
+  }
+
+  // 2. Parser nativo como suporte
   try {
     const { data: html } = await axios.get(episodeUrl, {
       headers: DEFAULT_HEADERS,
@@ -276,7 +329,6 @@ async function handleEpisode(episodeUrl) {
 
     const $ = cheerio.load(html);
 
-    // Buscar iframe do player
     const iframeSrc =
       $('iframe.metaframe').attr('src') ||
       $('iframe[src*="oneplayer.site"]').attr('src') ||
@@ -289,14 +341,9 @@ async function handleEpisode(episodeUrl) {
       const seriesId = urlObj.searchParams.get('i');
       const episodeNum = urlObj.searchParams.get('e');
       const seasonNum = urlObj.searchParams.get('t');
-      const serverCode = urlObj.searchParams.get('s') || 'HD7';
+      const serverCode = (urlObj.searchParams.get('s') || 'HD13').toUpperCase();
 
-      let video = null;
-      if (SERVER_TOKENS[serverCode] && SERVER_TOKENS[serverCode].buildSeriesUrl) {
-        video = SERVER_TOKENS[serverCode].buildSeriesUrl(seriesId, seasonNum, episodeNum);
-      } else {
-        video = `http://shd7.oneplayer.site/u657uy56y5r4tfg4r3eftg345tgy45hj456th45tjh456uj56ujhryz3/SHD7/${seriesId}/${seasonNum}x${episodeNum}.mp4`;
-      }
+      const video = buildSeriesUrl(serverCode, seriesId, seasonNum, episodeNum);
 
       return {
         video,
@@ -305,11 +352,10 @@ async function handleEpisode(episodeUrl) {
       };
     }
   } catch (err) {
-    console.warn('[MaxPlus] Erro no scraper direto de episódio:', err.message);
+    console.warn('[MaxPlus] Scraper direto de episódio falhou:', err.message);
   }
 
-  // Backup garantido
-  return await fetchBackupApi('ep', episodeUrl);
+  return { error: 'Player não encontrado.' };
 }
 
 /**
@@ -325,7 +371,6 @@ module.exports = async (req, res) => {
     'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization'
   );
 
-  // Responder a preflight requests imediatamente
   if (req.method === 'OPTIONS') {
     res.status(200).end();
     return;
@@ -341,7 +386,7 @@ module.exports = async (req, res) => {
       return res.status(200).json(data);
     }
 
-    // 2. Detalhes de Conteúdo (Filme ou Série)
+    // 2. Detalhes de Filme ou Série
     if (id) {
       const data = await handleDetails(id);
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -355,21 +400,21 @@ module.exports = async (req, res) => {
       return res.status(200).json(data);
     }
 
-    // Raiz / Informações da API
+    // Raiz / Status
     return res.status(200).json({
       status: 'online',
-      name: 'API MaxPlus v1.0',
-      description: 'Extrator Oficial de Filmes, Series e Episodios',
-      version: '1.0.0',
+      name: 'API MaxPlus v1.1',
+      description: 'Extrator Oficial de Filmes, Séries e Episódios',
+      version: '1.1.0',
       endpoints: {
         catalogo: '/api/maxplus?url=http://apps.zynner.site/movies/',
         detalhes: '/api/maxplus?id=http://apps.zynner.site/movies/o-homem-que-sussurra/',
         episodio: '/api/maxplus?ep=http://apps.zynner.site/episodes/reacher-1x1/'
       },
-      documentation: 'Envie ?url= para listar catalogo, ?id= para obter detalhes/filme, ?ep= para video do episodio.'
+      documentation: 'Envie ?url= para catálogo, ?id= para detalhes/filme, ?ep= para vídeo do episódio.'
     });
   } catch (error) {
-    console.error('[MaxPlus] Erro inesperado na requisição:', error);
+    console.error('[MaxPlus] Erro inesperado:', error);
     return res.status(500).json({
       error: 'Erro interno ao processar requisição no MaxPlus',
       message: error.message
