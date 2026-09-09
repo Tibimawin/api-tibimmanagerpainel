@@ -1,0 +1,23 @@
+{
+  "name": "api-maxplus",
+  "version": "1.0.0",
+  "description": "API MaxPlus - Extrator e Decodificador de Filmes, Series e Videos",
+  "main": "api/maxplus.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "maxplus",
+    "scraper",
+    "movies",
+    "series",
+    "vercel"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.7.9",
+    "cheerio": "^1.0.0"
+  }
+}
