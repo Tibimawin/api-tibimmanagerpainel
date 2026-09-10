@@ -1,5 +1,5 @@
 /**
- * API MaxPlus - v1.1
+ * API MaxPlus - v1.2
  * Extrator e Decodificador Oficial de Filmes, Séries e Vídeos
  * Compatível com Vercel Serverless Functions e Node.js
  */
@@ -44,7 +44,6 @@ function buildSeriesUrl(serverCode, seriesId, season, episode) {
     return SERVER_TOKENS[code].buildSeriesUrl(seriesId, season, episode);
   }
 
-  // Extrair número do servidor (ex: HD13 -> 13, HD8 -> 8)
   const numMatch = code.match(/\d+/);
   const num = numMatch ? numMatch[0] : '13';
 
@@ -130,12 +129,17 @@ async function handleListing(targetUrl) {
         if (txt && !genresList.includes(txt)) genresList.push(txt);
       });
 
+      const isLegendado =
+        nome.toLowerCase().includes('legendado') ||
+        genresList.some((g) => g.toLowerCase().includes('legendado'));
+
       if (nome && link) {
         items.push({
           imagem: poster.startsWith('//') ? `https:${poster}` : poster,
           nome,
           link,
-          genres: genresList.join(', ')
+          genres: genresList.join(', '),
+          idioma: isLegendado ? 'Legendado' : 'Dublado'
         });
       }
     });
@@ -147,18 +151,31 @@ async function handleListing(targetUrl) {
     console.warn('[MaxPlus] Scraper de listagem falhou, usando contingência:', err.message);
   }
 
-  return await fetchBackupApi('url', targetUrl);
+  const backupData = await fetchBackupApi('url', targetUrl);
+  if (Array.isArray(backupData)) {
+    return backupData.map((item) => ({
+      ...item,
+      idioma:
+        item.nome && item.nome.toLowerCase().includes('legendado') ? 'Legendado' : 'Dublado'
+    }));
+  }
+  return backupData;
 }
 
 /**
  * Endpoint 2: Detalhes de Filme ou Série (?id=...)
  */
 async function handleDetails(itemUrl) {
-  // Para filmes: verificar se a API de contingência já possui o link direto pronto e validado
   const isPossibleMovie = itemUrl.includes('/movies/');
+
+  // Para filmes: verificar contingência primeiro
   if (isPossibleMovie) {
     const verifiedData = await fetchBackupApi('id', itemUrl);
     if (verifiedData && verifiedData.video) {
+      const isLeg =
+        (verifiedData.video && verifiedData.video.includes('LEG.mp4')) ||
+        (verifiedData.nome && verifiedData.nome.toLowerCase().includes('legendado'));
+      verifiedData.idioma = isLeg ? 'Legendado' : 'Dublado';
       return verifiedData;
     }
   }
@@ -233,6 +250,15 @@ async function handleDetails(itemUrl) {
         });
       });
 
+      // Detecção inteligente de idioma para série
+      let idiomaSerie = 'Dublado';
+      if (
+        nome.toLowerCase().includes('legendado') ||
+        generosList.some((g) => g.toLowerCase().includes('legendado'))
+      ) {
+        idiomaSerie = 'Legendado';
+      }
+
       return {
         nome,
         imagem: poster.startsWith('//') ? `https:${poster}` : poster,
@@ -241,13 +267,14 @@ async function handleDetails(itemUrl) {
         'generos-links': generosLinks,
         video: null,
         server_used: null,
+        idioma: idiomaSerie,
         estrelas,
         total_seasons: seasons_details.length,
         seasons_details
       };
     }
 
-    // Se for Filme: resolver o player DooPlay e URL do OnePlayer
+    // Se for Filme
     let videoUrl = null;
     let serverUsed = 'HD4';
 
@@ -287,9 +314,16 @@ async function handleDetails(itemUrl) {
     if (!videoUrl) {
       const backupData = await fetchBackupApi('id', itemUrl);
       if (backupData && backupData.video) {
+        const isLeg =
+          backupData.video.includes('LEG.mp4') ||
+          (backupData.nome && backupData.nome.toLowerCase().includes('legendado'));
+        backupData.idioma = isLeg ? 'Legendado' : 'Dublado';
         return backupData;
       }
     }
+
+    const isLegMovie =
+      (videoUrl && videoUrl.includes('LEG.mp4')) || nome.toLowerCase().includes('legendado');
 
     return {
       nome,
@@ -299,6 +333,7 @@ async function handleDetails(itemUrl) {
       'generos-links': generosLinks,
       video: videoUrl,
       server_used: serverUsed,
+      idioma: isLegMovie ? 'Legendado' : 'Dublado',
       estrelas,
       total_seasons: 0,
       seasons_details: []
@@ -307,20 +342,30 @@ async function handleDetails(itemUrl) {
     console.warn('[MaxPlus] Scraper de detalhes falhou, usando contingência:', err.message);
   }
 
-  return await fetchBackupApi('id', itemUrl);
+  const backupData = await fetchBackupApi('id', itemUrl);
+  if (backupData) {
+    const isLeg =
+      (backupData.video && backupData.video.includes('LEG.mp4')) ||
+      (backupData.nome && backupData.nome.toLowerCase().includes('legendado'));
+    backupData.idioma = isLeg ? 'Legendado' : 'Dublado';
+  }
+  return backupData;
 }
 
 /**
  * Endpoint 3: Decodificador de Vídeo do Episódio (?ep=...)
  */
 async function handleEpisode(episodeUrl) {
-  // 1. Prioridade Máxima: Obter o link real e verificado do motor de contingência
+  // 1. Prioridade: Obter da contingência validada
   const verifiedData = await fetchBackupApi('ep', episodeUrl);
   if (verifiedData && verifiedData.video) {
+    const isLeg =
+      verifiedData.video.includes('LEG.mp4') || verifiedData.video.includes('_LEG');
+    verifiedData.idioma = isLeg ? 'Legendado' : 'Dublado';
     return verifiedData;
   }
 
-  // 2. Parser nativo como suporte
+  // 2. Parser nativo
   try {
     const { data: html } = await axios.get(episodeUrl, {
       headers: DEFAULT_HEADERS,
@@ -328,6 +373,11 @@ async function handleEpisode(episodeUrl) {
     });
 
     const $ = cheerio.load(html);
+
+    const playerOptionTitle = $('li.dooplay_player_option .title, #playeroptions .title')
+      .text()
+      .trim();
+    const isOptionLegendado = playerOptionTitle.toLowerCase().includes('legendado');
 
     const iframeSrc =
       $('iframe.metaframe').attr('src') ||
@@ -344,11 +394,15 @@ async function handleEpisode(episodeUrl) {
       const serverCode = (urlObj.searchParams.get('s') || 'HD13').toUpperCase();
 
       const video = buildSeriesUrl(serverCode, seriesId, seasonNum, episodeNum);
+      const isLeg =
+        (video && (video.includes('LEG.mp4') || video.includes('_LEG'))) ||
+        isOptionLegendado;
 
       return {
         video,
         server_used: serverCode,
-        player_url: cleanSrc
+        player_url: cleanSrc,
+        idioma: isLeg ? 'Legendado' : 'Dublado'
       };
     }
   } catch (err) {
@@ -362,7 +416,6 @@ async function handleEpisode(episodeUrl) {
  * Handler Principal da Função Serverless (Vercel)
  */
 module.exports = async (req, res) => {
-  // Configuração Global de CORS Permissivo
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
@@ -379,39 +432,35 @@ module.exports = async (req, res) => {
   const { url, id, ep } = req.query || {};
 
   try {
-    // 1. Listagem de Catálogo
     if (url) {
       const data = await handleListing(url);
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       return res.status(200).json(data);
     }
 
-    // 2. Detalhes de Filme ou Série
     if (id) {
       const data = await handleDetails(id);
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       return res.status(200).json(data);
     }
 
-    // 3. Link de Vídeo de Episódio
     if (ep) {
       const data = await handleEpisode(ep);
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       return res.status(200).json(data);
     }
 
-    // Raiz / Status
     return res.status(200).json({
       status: 'online',
-      name: 'API MaxPlus v1.1',
-      description: 'Extrator Oficial de Filmes, Séries e Episódios',
-      version: '1.1.0',
+      name: 'API MaxPlus v1.2',
+      description: 'Extrator Oficial de Filmes, Séries e Episódios com detecção de Idioma',
+      version: '1.2.0',
       endpoints: {
         catalogo: '/api/maxplus?url=http://apps.zynner.site/movies/',
         detalhes: '/api/maxplus?id=http://apps.zynner.site/movies/o-homem-que-sussurra/',
         episodio: '/api/maxplus?ep=http://apps.zynner.site/episodes/reacher-1x1/'
       },
-      documentation: 'Envie ?url= para catálogo, ?id= para detalhes/filme, ?ep= para vídeo do episódio.'
+      documentation: 'Envie ?url= para catálogo, ?id= para detalhes/filme/série, ?ep= para vídeo do episódio.'
     });
   } catch (error) {
     console.error('[MaxPlus] Erro inesperado:', error);
