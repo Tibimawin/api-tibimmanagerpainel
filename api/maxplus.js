@@ -270,6 +270,7 @@ async function handleDetails(itemUrl) {
         idioma: idiomaSerie,
         estrelas,
         total_seasons: seasons_details.length,
+        temporadas: seasons_details.length,
         seasons_details
       };
     }
@@ -348,6 +349,12 @@ async function handleDetails(itemUrl) {
       (backupData.video && backupData.video.includes('LEG.mp4')) ||
       (backupData.nome && backupData.nome.toLowerCase().includes('legendado'));
     backupData.idioma = isLeg ? 'Legendado' : 'Dublado';
+    backupData.temporadas =
+      backupData.total_seasons !== undefined
+        ? backupData.total_seasons
+        : backupData.seasons_details
+          ? backupData.seasons_details.length
+          : 0;
   }
   return backupData;
 }
